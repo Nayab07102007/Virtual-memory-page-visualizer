@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Memory Page Replacement Visualizer</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--tx:#1d1d1f;--mu:#6b6b70;--bd:#dcdcd6;--ac:#2f5bea;--fault:#fde2e0;--faultx:#b3261e;--hit:#dff3e4;--hitx:#1e7a3a;--fut:#eeeeea}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16171a;--card:#202226;--tx:#ececf0;--mu:#9a9aa3;--bd:#34363c;--ac:#7c9bff;--fault:#4a2220;--faultx:#ff9a92;--hit:#1d3a27;--hitx:#7fdc9b;--fut:#292b30}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px}
+main{max-width:1000px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+p.sub{color:var(--mu);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+label{display:flex;flex-direction:column;font-size:12px;color:var(--mu);gap:4px}
+input,select,button{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+input#refs{width:360px;max-width:100%}
+button{cursor:pointer}
+button.p{background:var(--ac);color:#fff;border-color:var(--ac)}
+button:disabled{opacity:.45;cursor:default}
+.grid{overflow-x:auto}
+table{border-collapse:separate;border-spacing:4px;margin:0 auto}
+th,td{min-width:38px;height:38px;text-align:center;border-radius:6px;font-weight:600}
+th{background:none;color:var(--mu);font-size:12px;font-weight:600}
+th.ref{background:var(--bd);color:var(--tx);font-size:14px}
+th.cur{background:var(--ac);color:#fff}
+td{background:var(--card);border:1px solid var(--bd)}
+td.fut{background:var(--fut);color:transparent;border-color:transparent}
+td.f{background:var(--fault);color:var(--faultx);border-color:var(--faultx)}
+td.h{background:var(--hit);color:var(--hitx);border-color:var(--hitx)}
+td.lbl{background:none;border:none;color:var(--mu);font-size:12px;font-weight:600;text-align:right;padding-right:6px}
+td.res{font-size:12px;border:none;background:none}
+td.res.F{color:var(--faultx)}td.res.H{color:var(--hitx)}
+.stats{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}
+.stat{flex:1;min-width:120px;background:var(--bg);border-radius:8px;padding:8px 12px}
+.stat b{display:block;font-size:20px}.stat span{font-size:12px;color:var(--mu)}
+#msg{margin-top:10px;min-height:22px;color:var(--mu)}
+.cmp{display:grid;grid-template-columns:90px 1fr 120px;gap:8px;align-items:center;margin:6px 0}
+.bar{height:16px;background:var(--fut);border-radius:8px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ac)}
+.best .bar i{background:var(--hitx)}
+.legend{font-size:12px;color:var(--mu);margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Virtual Memory Page Replacement Visualizer</h1>
+<p class="sub">Step through FIFO, LRU, Optimal and Clock (Second Chance) on any reference string.</p>
+
+<div class="card">
+<div class="row">
+<label>Reference string<input id="refs" value="7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1"></label>
+<label>Frames<select id="nf"></select></label>
+<label>Algorithm<select id="algo"><option value="fifo">FIFO</option><option value="lru">LRU</option><option value="opt">Optimal</option><option value="clock">Clock</option></select></label>
+<button class="p" id="run">Load</button>
+<button id="rand">Random</button>
+<button id="belady">Belady’s anomaly</button>
+</div>
+</div>
+
+<div class="card">
+<div class="row">
+<button id="prev">◀ Prev</button><button id="next" class="p">Step ▶</button><button id="play">Play</button><button id="end">Finish</button><button id="reset">Reset</button>
+<label>Speed<input type="range" id="spd" min="150" max="1500" value="700"></label>
+</div>
+<div class="grid" style="margin-top:14px"><table id="tbl"></table></div>
+<div id="msg"></div>
+<div class="stats">
+<div class="stat"><b id="sF">0</b><span>Page faults</span></div>
+<div class="stat"><b id="sH">0</b><span>Hits</span></div>
+<div class="stat"><b id="sR">0%</b><span>Hit ratio</span></div>
+<div class="stat"><b id="sC">0 / 0</b><span>Step</span></div>
+</div>
+<div class="legend">Red = page fault (page loaded into that frame). Green = hit. Clock mode also shows the reference bit and hand (*).</div>
+</div>
+
+<div class="card">
+<b>Compare all algorithms</b> <span class="legend">(same reference string and frame count, full run)</span>
+<div id="cmp"></div>
+</div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const NAMES={fifo:'FIFO',lru:'LRU',opt:'Optimal',clock:'Clock'};
+for(let i=1;i<=10;i++)$('nf').add(new Option(i,i,i===3,i===3));
+let refs=[],steps=[],cur=0,timer=null;
+
+function parse(){return $('refs').value.split(/[\s,]+/).filter(Boolean).map(Number).filter(n=>Number.isInteger(n)&&n>=0)}
+
+function sim(algo,R,n){
+  let fr=Array(n).fill(null),out=[],fifo=0,last={},bits=Array(n).fill(0),hand=0;
+  R.forEach((p,i)=>{
+    let idx=fr.indexOf(p),fault=idx<0,slot=idx,ev=null;
+    if(fault){
+      if(algo==='clock'){
+        while(fr[hand]!==null&&bits[hand]===1){bits[hand]=0;hand=(hand+1)%n}
+        slot=hand;ev=fr[slot];fr[slot]=p;bits[slot]=1;hand=(hand+1)%n;
+      }else{
+        let e=fr.indexOf(null);
+        if(e>=0)slot=e;
+        else if(algo==='fifo'){slot=fifo;fifo=(fifo+1)%n}
+        else if(algo==='lru'){slot=0;fr.forEach((q,s)=>{if(last[q]<last[fr[slot]])slot=s})}
+        else{let far=-1;slot=0;fr.forEach((q,s)=>{let k=R.indexOf(q,i+1);if(k<0)k=Infinity;if(k>far){far=k;slot=s}})}
+        ev=fr[slot];fr[slot]=p;
+      }
+    }else if(algo==='clock')bits[idx]=1;
+    last[p]=i;
+    out.push({p,fr:fr.slice(),fault,slot,ev,bits:bits.slice(),hand});
+  });
+  return out;
+}
+
+function render(){
+  const n=+$('nf').value,algo=$('algo').value,t=$('tbl');
+  let h='<tr><td class="lbl">Ref</td>'+refs.map((p,i)=>`<th class="ref ${i===cur-1?'cur':''}">${p}</th>`).join('')+'</tr>';
+  for(let s=0;s<n;s++){
+    h+=`<tr><td class="lbl">Frame ${s+1}</td>`;
+    refs.forEach((p,i)=>{
+      if(i>=cur){h+='<td class="fut">.</td>';return}
+      const st=steps[i],v=st.fr[s];
+      let cls=st.slot===s?(st.fault?'f':'h'):'';
+      let txt=v===null?'':v;
+      if(algo==='clock'&&v!==null)txt+=`<sup style="font-size:10px">${st.bits[s]}${st.hand===s?'*':''}</sup>`;
+      h+=`<td class="${cls}">${txt}</td>`;
+    });
+    h+='</tr>';
+  }
+  h+='<tr><td class="lbl">Result</td>'+refs.map((p,i)=>i<cur?`<td class="res ${steps[i].fault?'F':'H'}">${steps[i].fault?'Fault':'Hit'}</td>`:'<td class="res"></td>').join('')+'</tr>';
+  t.innerHTML=h;
+  const f=steps.slice(0,cur).filter(x=>x.fault).length;
+  $('sF').textContent=f;$('sH').textContent=cur-f;
+  $('sR').textContent=cur?Math.round((cur-f)/cur*100)+'%':'0%';
+  $('sC').textContent=cur+' / '+refs.length;
+  const st=steps[cur-1];
+  $('msg').textContent=!st?'Press Step or Play to begin.':st.fault?`Page ${st.p} not in memory: fault. ${st.ev===null?`Loaded into empty frame ${st.slot+1}.`:`Replaced page ${st.ev} in frame ${st.slot+1}.`}`:`Page ${st.p} already in frame ${st.slot+1}: hit.`;
+  $('prev').disabled=cur===0;$('next').disabled=$('end').disabled=cur>=refs.length;
+  const sc=t.parentElement;sc.scrollLeft=sc.scrollWidth*cur/Math.max(refs.length,1)-sc.clientWidth/2;
+}
+
+function compare(){
+  const n=+$('nf').value,res=Object.keys(NAMES).map(a=>[a,sim(a,refs,n).filter(x=>x.fault).length]);
+  const min=Math.min(...res.map(r=>r[1])),mx=Math.max(refs.length,1);
+  $('cmp').innerHTML=res.map(([a,f])=>`<div class="cmp ${f===min?'best':''}"><span>${NAMES[a]}</span><div class="bar"><i style="width:${f/mx*100}%"></i></div><span>${f} faults (${Math.round((refs.length-f)/mx*100)}% hits)</span></div>`).join('');
+}
+
+function load(){
+  stop();refs=parse();
+  if(!refs.length){$('msg').textContent='Enter a reference string of non-negative integers.';return}
+  steps=sim($('algo').value,refs,+$('nf').value);cur=0;render();compare();
+}
+function stop(){clearInterval(timer);timer=null;$('play').textContent='Play'}
+function next(){if(cur<refs.length){cur++;render()}else stop()}
+$('run').onclick=load;$('algo').onchange=$('nf').onchange=load;$('reset').onclick=load;
+$('next').onclick=()=>{stop();next()};
+$('prev').onclick=()=>{stop();if(cur>0){cur--;render()}};
+$('end').onclick=()=>{stop();cur=refs.length;render()};
+$('play').onclick=()=>{
+  if(timer){stop();return}
+  if(cur>=refs.length)cur=0;
+  $('play').textContent='Pause';timer=setInterval(next,+$('spd').value);
+};
+$('spd').oninput=()=>{if(timer){clearInterval(timer);timer=setInterval(next,+$('spd').value)}};
+$('rand').onclick=()=>{$('refs').value=Array.from({length:20},()=>Math.floor(Math.random()*8)).join(' ');load()};
+$('belady').onclick=()=>{$('refs').value='1 2 3 4 1 2 5 1 2 3 4 5';$('algo').value='fifo';$('nf').value=3;load();
+  $('msg').textContent='FIFO gives 9 faults with 3 frames. Change Frames to 4 and it rises to 10.'};
+load();
+</script>
+</body>
+</html>
